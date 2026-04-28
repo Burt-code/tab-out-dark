@@ -212,7 +212,6 @@ async function closeTabOutDupes() {
        url: "https://example.com",
        title: "Example Page",
        savedAt: "2026-04-04T10:00:00.000Z",  // ISO date string
-       completed: false,             // true = checked off (archived)
        dismissed: false              // true = dismissed without reading
      },
      ...
@@ -232,7 +231,6 @@ async function saveTabForLater(tab) {
     url:       tab.url,
     title:     tab.title,
     savedAt:   new Date().toISOString(),
-    completed: false,
     dismissed: false,
   });
   await chrome.storage.local.set({ deferred });
@@ -242,31 +240,11 @@ async function saveTabForLater(tab) {
  * getSavedTabs()
  *
  * Returns all saved tabs from chrome.storage.local.
- * Filters out dismissed items (those are gone for good).
- * Splits into active (not completed) and archived (completed).
+ * Filters out dismissed items and legacy completed items.
  */
 async function getSavedTabs() {
   const { deferred = [] } = await chrome.storage.local.get('deferred');
-  const visible = deferred.filter(t => !t.dismissed);
-  return {
-    active:   visible.filter(t => !t.completed),
-    archived: visible.filter(t => t.completed),
-  };
-}
-
-/**
- * checkOffSavedTab(id)
- *
- * Marks a saved tab as completed (checked off). It moves to the archive.
- */
-async function checkOffSavedTab(id) {
-  const { deferred = [] } = await chrome.storage.local.get('deferred');
-  const tab = deferred.find(t => t.id === id);
-  if (tab) {
-    tab.completed = true;
-    tab.completedAt = new Date().toISOString();
-    await chrome.storage.local.set({ deferred });
-  }
+  return deferred.filter(t => !t.dismissed && !t.completed);
 }
 
 /**
@@ -445,7 +423,7 @@ function showToast(message) {
 /**
  * checkAndShowEmptyState()
  *
- * Shows a cheerful "Inbox zero" message when all domain cards are gone.
+ * Shows a cheerful empty state when all domain cards are gone.
  */
 function checkAndShowEmptyState() {
   const missionsEl = document.getElementById('openTabsMissions');
@@ -463,8 +441,15 @@ function checkAndShowEmptyState() {
       </div>
       <div class="empty-title">Inbox zero, but for tabs.</div>
       <div class="empty-subtitle">You're free.</div>
+      ${renderTabOutSearchForm('empty')}
     </div>
   `;
+
+  const sectionEl = document.getElementById('openTabsSection');
+  if (sectionEl) sectionEl.style.display = 'block';
+
+  const titleEl = document.getElementById('openTabsSectionTitle');
+  if (titleEl) titleEl.textContent = 'Open tabs';
 
   const countEl = document.getElementById('openTabsSectionCount');
   if (countEl) countEl.textContent = '0 domains';
@@ -490,29 +475,6 @@ function timeAgo(dateStr) {
   if (diffDays === 1) return 'yesterday';
   return diffDays + ' days ago';
 }
-
-/**
- * getGreeting() — "Good morning / afternoon / evening"
- */
-function getGreeting() {
-  const hour = new Date().getHours();
-  if (hour < 12) return 'Good morning';
-  if (hour < 17) return 'Good afternoon';
-  return 'Good evening';
-}
-
-/**
- * getDateDisplay() — "Friday, April 4, 2026"
- */
-function getDateDisplay() {
-  return new Date().toLocaleDateString('en-US', {
-    weekday: 'long',
-    year:    'numeric',
-    month:   'long',
-    day:     'numeric',
-  });
-}
-
 
 /* ----------------------------------------------------------------
    DOMAIN & TITLE CLEANUP HELPERS
@@ -698,7 +660,6 @@ function smartTitle(title, url) {
 const ICONS = {
   tabs:    `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8.25V18a2.25 2.25 0 0 0 2.25 2.25h13.5A2.25 2.25 0 0 0 21 18V8.25m-18 0V6a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 6v2.25m-18 0h18" /></svg>`,
   close:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>`,
-  archive: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m6 4.125l2.25 2.25m0 0l2.25 2.25M12 13.875l2.25-2.25M12 13.875l-2.25 2.25M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" /></svg>`,
   focus:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 19.5 15-15m0 0H8.25m11.25 0v11.25" /></svg>`,
 };
 
@@ -707,6 +668,30 @@ const ICONS = {
    IN-MEMORY STORE FOR OPEN-TAB GROUPS
    ---------------------------------------------------------------- */
 let domainGroups = [];
+let domainPageIndex = 0;
+
+const DOMAINS_PER_PAGE = 6;
+const DOMAIN_WHEEL_THRESHOLD = 48;
+const DOMAIN_WHEEL_COOLDOWN_MS = 520;
+let lastDomainWheelAt = 0;
+
+async function loadOptionalLocalConfig() {
+  const src = 'config.local.js';
+  try {
+    const response = await fetch(chrome.runtime.getURL(src), { cache: 'no-store' });
+    if (!response.ok) return;
+  } catch {
+    return;
+  }
+
+  return new Promise((resolve) => {
+    const script = document.createElement('script');
+    script.src = src;
+    script.addEventListener('load', resolve, { once: true });
+    script.addEventListener('error', resolve, { once: true });
+    document.head.appendChild(script);
+  });
+}
 
 
 /* ----------------------------------------------------------------
@@ -769,7 +754,7 @@ function buildOverflowChips(hiddenTabs, urlCounts = {}) {
     try { domain = new URL(tab.url).hostname; } catch {}
     const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
-      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
+      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="">` : ''}
       <span class="chip-text">${label}</span>${dupeTag}
       <div class="chip-actions">
         <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
@@ -783,10 +768,67 @@ function buildOverflowChips(hiddenTabs, urlCounts = {}) {
   }).join('');
 
   return `
-    <div class="page-chips-overflow" style="display:none">${hiddenChips}</div>
+    <div class="page-chips-overflow is-hidden">${hiddenChips}</div>
     <div class="page-chip page-chip-overflow clickable" data-action="expand-chips">
       <span class="chip-text">+${hiddenTabs.length} more</span>
     </div>`;
+}
+
+function normalizePageIndex(index, pageCount) {
+  if (pageCount <= 0) return 0;
+  return ((index % pageCount) + pageCount) % pageCount;
+}
+
+function renderTabOutSearchForm(kind = 'bottom') {
+  const formClass = kind === 'empty' ? 'empty-search-form' : 'bottom-search-form';
+  const inputClass = kind === 'empty' ? 'empty-search-input' : 'bottom-search-input';
+  return `
+    <form class="${formClass}" data-action="tabout-search">
+      <input
+        class="${inputClass}"
+        type="search"
+        name="q"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="Search with your default engine..."
+        aria-label="Search with your default engine"
+      >
+    </form>`;
+}
+
+function renderDomainPager(pageCount) {
+  if (pageCount <= 1) return '';
+
+  const dots = Array.from({ length: pageCount }, (_, i) => `
+    <span class="domain-pager-dot${i === domainPageIndex ? ' active' : ''}" aria-hidden="true"></span>
+  `).join('');
+
+  return `
+    <div class="domain-pager" aria-label="Domain pages">
+      <button class="domain-pager-btn" data-action="prev-domain-page" aria-label="Previous domain page">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.25" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
+      </button>
+      <div class="domain-pager-status">
+        <div class="domain-pager-dots">${dots}</div>
+        <span class="domain-pager-count">${domainPageIndex + 1}/${pageCount}</span>
+      </div>
+      <button class="domain-pager-btn" data-action="next-domain-page" aria-label="Next domain page">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.25" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" /></svg>
+      </button>
+    </div>`;
+}
+
+function renderOpenTabsUtility(pageCount) {
+  const pager = renderDomainPager(pageCount);
+  return pager ? `<div class="open-tabs-utility">${pager}</div>` : '';
+}
+
+async function moveDomainPage(delta) {
+  const pageCount = Math.ceil(domainGroups.length / DOMAINS_PER_PAGE);
+  if (pageCount <= 1) return;
+
+  domainPageIndex = normalizePageIndex(domainPageIndex + delta, pageCount);
+  await renderStaticDashboard();
 }
 
 
@@ -819,7 +861,7 @@ function renderDomainCard(group) {
   </span>`;
 
   const dupeBadge = hasDupes
-    ? `<span class="open-tabs-badge" style="color:var(--accent-amber);background:rgba(200,113,58,0.08);">
+    ? `<span class="open-tabs-badge dupe-badge">
         ${totalExtras} duplicate${totalExtras !== 1 ? 's' : ''}
       </span>`
     : '';
@@ -850,7 +892,7 @@ function renderDomainCard(group) {
     try { domain = new URL(tab.url).hostname; } catch {}
     const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
-      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
+      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="">` : ''}
       <span class="chip-text">${label}</span>${dupeTag}
       <div class="chip-actions">
         <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
@@ -898,39 +940,35 @@ function renderDomainCard(group) {
 
 
 /* ----------------------------------------------------------------
-   SAVED FOR LATER — Render Checklist Column
+   SAVED FOR LATER — Render Saved Column
    ---------------------------------------------------------------- */
 
 /**
  * renderDeferredColumn()
  *
  * Reads saved tabs from chrome.storage.local and renders the right-side
- * "Saved for Later" checklist column. Shows active items as a checklist
- * and completed items in a collapsible archive.
+ * "Saved for Later" column.
  */
 async function renderDeferredColumn() {
   const column         = document.getElementById('deferredColumn');
   const list           = document.getElementById('deferredList');
   const empty          = document.getElementById('deferredEmpty');
   const countEl        = document.getElementById('deferredCount');
-  const archiveEl      = document.getElementById('deferredArchive');
-  const archiveCountEl = document.getElementById('archiveCount');
-  const archiveList    = document.getElementById('archiveList');
 
   if (!column) return;
 
   try {
-    const { active, archived } = await getSavedTabs();
+    const active = await getSavedTabs();
 
     // Hide the entire column if there's nothing to show
-    if (active.length === 0 && archived.length === 0) {
+    if (active.length === 0) {
       column.style.display = 'none';
       return;
     }
 
     column.style.display = 'block';
 
-    // Render active checklist items
+    // Render saved items
     if (active.length > 0) {
       countEl.textContent = `${active.length} item${active.length !== 1 ? 's' : ''}`;
       list.innerHTML = active.map(item => renderDeferredItem(item)).join('');
@@ -942,15 +980,6 @@ async function renderDeferredColumn() {
       empty.style.display = 'block';
     }
 
-    // Render archive section
-    if (archived.length > 0) {
-      archiveCountEl.textContent = `(${archived.length})`;
-      archiveList.innerHTML = archived.map(item => renderArchiveItem(item)).join('');
-      archiveEl.style.display = 'block';
-    } else {
-      archiveEl.style.display = 'none';
-    }
-
   } catch (err) {
     console.warn('[tab-out] Could not load saved tabs:', err);
     column.style.display = 'none';
@@ -960,7 +989,7 @@ async function renderDeferredColumn() {
 /**
  * renderDeferredItem(item)
  *
- * Builds HTML for one active checklist item: checkbox, title link,
+ * Builds HTML for one saved item: title link,
  * domain, time ago, dismiss button.
  */
 function renderDeferredItem(item) {
@@ -971,10 +1000,9 @@ function renderDeferredItem(item) {
 
   return `
     <div class="deferred-item" data-deferred-id="${item.id}">
-      <input type="checkbox" class="deferred-checkbox" data-action="check-deferred" data-deferred-id="${item.id}">
       <div class="deferred-info">
         <a href="${item.url}" target="_blank" rel="noopener" class="deferred-title" title="${(item.title || '').replace(/"/g, '&quot;')}">
-          <img src="${faviconUrl}" alt="" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px" onerror="this.style.display='none'">${item.title || item.url}
+          <img class="deferred-favicon" src="${faviconUrl}" alt="">${item.title || item.url}
         </a>
         <div class="deferred-meta">
           <span>${domain}</span>
@@ -987,22 +1015,6 @@ function renderDeferredItem(item) {
     </div>`;
 }
 
-/**
- * renderArchiveItem(item)
- *
- * Builds HTML for one completed/archived item (simpler: just title + date).
- */
-function renderArchiveItem(item) {
-  const ago = item.completedAt ? timeAgo(item.completedAt) : timeAgo(item.savedAt);
-  return `
-    <div class="archive-item">
-      <a href="${item.url}" target="_blank" rel="noopener" class="archive-item-title" title="${(item.title || '').replace(/"/g, '&quot;')}">
-        ${item.title || item.url}
-      </a>
-      <span class="archive-item-date">${ago}</span>
-    </div>`;
-}
-
 
 /* ----------------------------------------------------------------
    MAIN DASHBOARD RENDERER
@@ -1012,20 +1024,12 @@ function renderArchiveItem(item) {
  * renderStaticDashboard()
  *
  * The main render function:
- * 1. Paints greeting + date
- * 2. Fetches open tabs via chrome.tabs.query()
- * 3. Groups tabs by domain (with landing pages pulled out to their own group)
- * 4. Renders domain cards
- * 5. Updates footer stats
- * 6. Renders the "Saved for Later" checklist
+ * 1. Fetches open tabs via chrome.tabs.query()
+ * 2. Groups tabs by domain (with landing pages pulled out to their own group)
+ * 3. Renders domain cards
+ * 4. Renders the "Saved for Later" list
  */
 async function renderStaticDashboard() {
-  // --- Header ---
-  const greetingEl = document.getElementById('greeting');
-  const dateEl     = document.getElementById('dateDisplay');
-  if (greetingEl) greetingEl.textContent = getGreeting();
-  if (dateEl)     dateEl.textContent     = getDateDisplay();
-
   // --- Fetch tabs ---
   await fetchOpenTabs();
   const realTabs = getRealTabs();
@@ -1149,17 +1153,25 @@ async function renderStaticDashboard() {
   const openTabsSectionTitle = document.getElementById('openTabsSectionTitle');
 
   if (domainGroups.length > 0 && openTabsSection) {
+    const pageCount = Math.ceil(domainGroups.length / DOMAINS_PER_PAGE);
+    domainPageIndex = normalizePageIndex(domainPageIndex, pageCount);
+    const pageStart = domainPageIndex * DOMAINS_PER_PAGE;
+    const visibleGroups = domainGroups.slice(pageStart, pageStart + DOMAINS_PER_PAGE);
+
     if (openTabsSectionTitle) openTabsSectionTitle.textContent = 'Open tabs';
-    openTabsSectionCount.innerHTML = `${domainGroups.length} domain${domainGroups.length !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; <button class="action-btn close-tabs" data-action="close-all-open-tabs" style="font-size:11px;padding:3px 10px;">${ICONS.close} Close all ${realTabs.length} tabs</button>`;
-    openTabsMissionsEl.innerHTML = domainGroups.map(g => renderDomainCard(g)).join('');
+    openTabsSectionCount.innerHTML = `${domainGroups.length} domain${domainGroups.length !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; <button class="action-btn close-tabs close-all-open-tabs" data-action="close-all-open-tabs">${ICONS.close} Close all ${realTabs.length} tabs</button>`;
+    openTabsMissionsEl.innerHTML = `
+      <div class="domain-page">
+        ${visibleGroups.map(g => renderDomainCard(g)).join('')}
+      </div>
+      ${renderOpenTabsUtility(pageCount)}
+    `;
     openTabsSection.style.display = 'block';
   } else if (openTabsSection) {
-    openTabsSection.style.display = 'none';
+    domainPageIndex = 0;
+    if (openTabsMissionsEl) openTabsMissionsEl.innerHTML = '';
+    checkAndShowEmptyState();
   }
-
-  // --- Footer stats ---
-  const statTabs = document.getElementById('statTabs');
-  if (statTabs) statTabs.textContent = openTabs.length;
 
   // --- Check for duplicate Tab Out tabs ---
   checkTabOutDupes();
@@ -1214,6 +1226,16 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
+  if (action === 'prev-domain-page') {
+    await moveDomainPage(-1);
+    return;
+  }
+
+  if (action === 'next-domain-page') {
+    await moveDomainPage(1);
+    return;
+  }
+
   // ---- Focus a specific tab ----
   if (action === 'focus-tab') {
     const tabUrl = actionEl.dataset.tabUrl;
@@ -1256,10 +1278,6 @@ document.addEventListener('click', async (e) => {
       }, 200);
     }
 
-    // Update footer
-    const statTabs = document.getElementById('statTabs');
-    if (statTabs) statTabs.textContent = openTabs.length;
-
     showToast('Tab closed');
     return;
   }
@@ -1284,41 +1302,9 @@ document.addEventListener('click', async (e) => {
     const allTabs = await chrome.tabs.query({});
     const match   = allTabs.find(t => t.url === tabUrl);
     if (match) await chrome.tabs.remove(match.id);
-    await fetchOpenTabs();
-
-    // Animate chip out
-    const chip = actionEl.closest('.page-chip');
-    if (chip) {
-      chip.style.transition = 'opacity 0.2s, transform 0.2s';
-      chip.style.opacity    = '0';
-      chip.style.transform  = 'scale(0.8)';
-      setTimeout(() => chip.remove(), 200);
-    }
 
     showToast('Saved for later');
-    await renderDeferredColumn();
-    return;
-  }
-
-  // ---- Check off a saved tab (moves it to archive) ----
-  if (action === 'check-deferred') {
-    const id = actionEl.dataset.deferredId;
-    if (!id) return;
-
-    await checkOffSavedTab(id);
-
-    // Animate: strikethrough first, then slide out
-    const item = actionEl.closest('.deferred-item');
-    if (item) {
-      item.classList.add('checked');
-      setTimeout(() => {
-        item.classList.add('removing');
-        setTimeout(() => {
-          item.remove();
-          renderDeferredColumn(); // refresh counts and archive
-        }, 300);
-      }, 800);
-    }
+    await renderStaticDashboard();
     return;
   }
 
@@ -1371,8 +1357,11 @@ document.addEventListener('click', async (e) => {
     const groupLabel = group.domain === '__landing-pages__' ? 'Homepages' : (group.label || friendlyDomain(group.domain));
     showToast(`Closed ${urls.length} tab${urls.length !== 1 ? 's' : ''} from ${groupLabel}`);
 
-    const statTabs = document.getElementById('statTabs');
-    if (statTabs) statTabs.textContent = openTabs.length;
+    if (card) {
+      setTimeout(() => renderStaticDashboard(), 260);
+    } else {
+      await renderStaticDashboard();
+    }
     return;
   }
 
@@ -1433,50 +1422,50 @@ document.addEventListener('click', async (e) => {
   }
 });
 
-// ---- Archive toggle — expand/collapse the archive section ----
-document.addEventListener('click', (e) => {
-  const toggle = e.target.closest('#archiveToggle');
-  if (!toggle) return;
+document.addEventListener('wheel', (e) => {
+  const missionsEl = e.target.closest('#openTabsMissions');
+  if (!missionsEl || e.target.closest('input, textarea, select')) return;
 
-  toggle.classList.toggle('open');
-  const body = document.getElementById('archiveBody');
-  if (body) {
-    body.style.display = body.style.display === 'none' ? 'block' : 'none';
+  const pageCount = Math.ceil(domainGroups.length / DOMAINS_PER_PAGE);
+  if (pageCount <= 1) return;
+
+  if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
+
+  const now = Date.now();
+  if (now - lastDomainWheelAt < DOMAIN_WHEEL_COOLDOWN_MS) return;
+  if (Math.abs(e.deltaX) < DOMAIN_WHEEL_THRESHOLD) return;
+
+  lastDomainWheelAt = now;
+  e.preventDefault();
+  moveDomainPage(e.deltaX > 0 ? 1 : -1);
+}, { passive: false });
+
+document.addEventListener('error', (e) => {
+  const img = e.target;
+  if (img instanceof HTMLImageElement && (img.classList.contains('chip-favicon') || img.classList.contains('deferred-favicon'))) {
+    img.style.display = 'none';
   }
-});
+}, true);
 
-// ---- Archive search — filter archived items as user types ----
-document.addEventListener('input', async (e) => {
-  if (e.target.id !== 'archiveSearch') return;
+document.addEventListener('submit', async (e) => {
+  const form = e.target.closest('[data-action="tabout-search"]');
+  if (!form) return;
 
-  const q = e.target.value.trim().toLowerCase();
-  const archiveList = document.getElementById('archiveList');
-  if (!archiveList) return;
+  e.preventDefault();
+
+  const input = form.querySelector('input[name="q"]');
+  const text = (input?.value || '').trim();
+  if (!text) return;
 
   try {
-    const { archived } = await getSavedTabs();
-
-    if (q.length < 2) {
-      // Show all archived items
-      archiveList.innerHTML = archived.map(item => renderArchiveItem(item)).join('');
-      return;
-    }
-
-    // Filter by title or URL containing the query string
-    const results = archived.filter(item =>
-      (item.title || '').toLowerCase().includes(q) ||
-      (item.url  || '').toLowerCase().includes(q)
-    );
-
-    archiveList.innerHTML = results.map(item => renderArchiveItem(item)).join('')
-      || '<div style="font-size:12px;color:var(--muted);padding:8px 0">No results</div>';
+    await chrome.search.query({ text, disposition: 'CURRENT_TAB' });
   } catch (err) {
-    console.warn('[tab-out] Archive search failed:', err);
+    console.warn('[tab-out] Search failed:', err);
+    showToast('Search failed');
   }
 });
-
 
 /* ----------------------------------------------------------------
    INITIALIZE
    ---------------------------------------------------------------- */
-renderDashboard();
+loadOptionalLocalConfig().then(renderDashboard);
