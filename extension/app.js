@@ -423,7 +423,7 @@ function showToast(message) {
 /**
  * checkAndShowEmptyState()
  *
- * Shows a cheerful "Inbox zero" message when all domain cards are gone.
+ * Shows a cheerful empty state when all domain cards are gone.
  */
 function checkAndShowEmptyState() {
   const missionsEl = document.getElementById('openTabsMissions');
@@ -441,8 +441,25 @@ function checkAndShowEmptyState() {
       </div>
       <div class="empty-title">Inbox zero, but for tabs.</div>
       <div class="empty-subtitle">You're free.</div>
+      <form class="empty-search-form" data-action="empty-search">
+        <input
+          class="empty-search-input"
+          type="search"
+          name="q"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Search with your default engine..."
+          aria-label="Search with your default engine"
+        >
+      </form>
     </div>
   `;
+
+  const sectionEl = document.getElementById('openTabsSection');
+  if (sectionEl) sectionEl.style.display = 'block';
+
+  const titleEl = document.getElementById('openTabsSectionTitle');
+  if (titleEl) titleEl.textContent = 'Open tabs';
 
   const countEl = document.getElementById('openTabsSectionCount');
   if (countEl) countEl.textContent = '0 domains';
@@ -662,6 +679,24 @@ const ICONS = {
    ---------------------------------------------------------------- */
 let domainGroups = [];
 
+async function loadOptionalLocalConfig() {
+  const src = 'config.local.js';
+  try {
+    const response = await fetch(chrome.runtime.getURL(src), { cache: 'no-store' });
+    if (!response.ok) return;
+  } catch {
+    return;
+  }
+
+  return new Promise((resolve) => {
+    const script = document.createElement('script');
+    script.src = src;
+    script.addEventListener('load', resolve, { once: true });
+    script.addEventListener('error', resolve, { once: true });
+    document.head.appendChild(script);
+  });
+}
+
 
 /* ----------------------------------------------------------------
    HELPER: filter out browser-internal pages
@@ -723,7 +758,7 @@ function buildOverflowChips(hiddenTabs, urlCounts = {}) {
     try { domain = new URL(tab.url).hostname; } catch {}
     const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
-      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
+      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="">` : ''}
       <span class="chip-text">${label}</span>${dupeTag}
       <div class="chip-actions">
         <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
@@ -737,7 +772,7 @@ function buildOverflowChips(hiddenTabs, urlCounts = {}) {
   }).join('');
 
   return `
-    <div class="page-chips-overflow" style="display:none">${hiddenChips}</div>
+    <div class="page-chips-overflow is-hidden">${hiddenChips}</div>
     <div class="page-chip page-chip-overflow clickable" data-action="expand-chips">
       <span class="chip-text">+${hiddenTabs.length} more</span>
     </div>`;
@@ -773,7 +808,7 @@ function renderDomainCard(group) {
   </span>`;
 
   const dupeBadge = hasDupes
-    ? `<span class="open-tabs-badge" style="color:var(--accent-amber);background:rgba(200,113,58,0.08);">
+    ? `<span class="open-tabs-badge dupe-badge">
         ${totalExtras} duplicate${totalExtras !== 1 ? 's' : ''}
       </span>`
     : '';
@@ -804,7 +839,7 @@ function renderDomainCard(group) {
     try { domain = new URL(tab.url).hostname; } catch {}
     const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
-      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
+      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="">` : ''}
       <span class="chip-text">${label}</span>${dupeTag}
       <div class="chip-actions">
         <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
@@ -914,7 +949,7 @@ function renderDeferredItem(item) {
     <div class="deferred-item" data-deferred-id="${item.id}">
       <div class="deferred-info">
         <a href="${item.url}" target="_blank" rel="noopener" class="deferred-title" title="${(item.title || '').replace(/"/g, '&quot;')}">
-          <img src="${faviconUrl}" alt="" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px" onerror="this.style.display='none'">${item.title || item.url}
+          <img class="deferred-favicon" src="${faviconUrl}" alt="">${item.title || item.url}
         </a>
         <div class="deferred-meta">
           <span>${domain}</span>
@@ -1066,11 +1101,12 @@ async function renderStaticDashboard() {
 
   if (domainGroups.length > 0 && openTabsSection) {
     if (openTabsSectionTitle) openTabsSectionTitle.textContent = 'Open tabs';
-    openTabsSectionCount.innerHTML = `${domainGroups.length} domain${domainGroups.length !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; <button class="action-btn close-tabs" data-action="close-all-open-tabs" style="font-size:11px;padding:3px 10px;">${ICONS.close} Close all ${realTabs.length} tabs</button>`;
+    openTabsSectionCount.innerHTML = `${domainGroups.length} domain${domainGroups.length !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; <button class="action-btn close-tabs close-all-open-tabs" data-action="close-all-open-tabs">${ICONS.close} Close all ${realTabs.length} tabs</button>`;
     openTabsMissionsEl.innerHTML = domainGroups.map(g => renderDomainCard(g)).join('');
     openTabsSection.style.display = 'block';
   } else if (openTabsSection) {
-    openTabsSection.style.display = 'none';
+    if (openTabsMissionsEl) openTabsMissionsEl.innerHTML = '';
+    checkAndShowEmptyState();
   }
 
   // --- Check for duplicate Tab Out tabs ---
@@ -1307,7 +1343,32 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+document.addEventListener('error', (e) => {
+  const img = e.target;
+  if (img instanceof HTMLImageElement && (img.classList.contains('chip-favicon') || img.classList.contains('deferred-favicon'))) {
+    img.style.display = 'none';
+  }
+}, true);
+
+document.addEventListener('submit', async (e) => {
+  const form = e.target.closest('[data-action="empty-search"]');
+  if (!form) return;
+
+  e.preventDefault();
+
+  const input = form.querySelector('input[name="q"]');
+  const text = (input?.value || '').trim();
+  if (!text) return;
+
+  try {
+    await chrome.search.query({ text, disposition: 'CURRENT_TAB' });
+  } catch (err) {
+    console.warn('[tab-out] Search failed:', err);
+    showToast('Search failed');
+  }
+});
+
 /* ----------------------------------------------------------------
    INITIALIZE
    ---------------------------------------------------------------- */
-renderDashboard();
+loadOptionalLocalConfig().then(renderDashboard);
