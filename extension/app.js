@@ -441,17 +441,7 @@ function checkAndShowEmptyState() {
       </div>
       <div class="empty-title">Inbox zero, but for tabs.</div>
       <div class="empty-subtitle">You're free.</div>
-      <form class="empty-search-form" data-action="empty-search">
-        <input
-          class="empty-search-input"
-          type="search"
-          name="q"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="Search with your default engine..."
-          aria-label="Search with your default engine"
-        >
-      </form>
+      ${renderTabOutSearchForm('empty')}
     </div>
   `;
 
@@ -678,6 +668,12 @@ const ICONS = {
    IN-MEMORY STORE FOR OPEN-TAB GROUPS
    ---------------------------------------------------------------- */
 let domainGroups = [];
+let domainPageIndex = 0;
+
+const DOMAINS_PER_PAGE = 6;
+const DOMAIN_WHEEL_THRESHOLD = 48;
+const DOMAIN_WHEEL_COOLDOWN_MS = 520;
+let lastDomainWheelAt = 0;
 
 async function loadOptionalLocalConfig() {
   const src = 'config.local.js';
@@ -776,6 +772,63 @@ function buildOverflowChips(hiddenTabs, urlCounts = {}) {
     <div class="page-chip page-chip-overflow clickable" data-action="expand-chips">
       <span class="chip-text">+${hiddenTabs.length} more</span>
     </div>`;
+}
+
+function normalizePageIndex(index, pageCount) {
+  if (pageCount <= 0) return 0;
+  return ((index % pageCount) + pageCount) % pageCount;
+}
+
+function renderTabOutSearchForm(kind = 'bottom') {
+  const formClass = kind === 'empty' ? 'empty-search-form' : 'bottom-search-form';
+  const inputClass = kind === 'empty' ? 'empty-search-input' : 'bottom-search-input';
+  return `
+    <form class="${formClass}" data-action="tabout-search">
+      <input
+        class="${inputClass}"
+        type="search"
+        name="q"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="Search with your default engine..."
+        aria-label="Search with your default engine"
+      >
+    </form>`;
+}
+
+function renderDomainPager(pageCount) {
+  if (pageCount <= 1) return '';
+
+  const dots = Array.from({ length: pageCount }, (_, i) => `
+    <span class="domain-pager-dot${i === domainPageIndex ? ' active' : ''}" aria-hidden="true"></span>
+  `).join('');
+
+  return `
+    <div class="domain-pager" aria-label="Domain pages">
+      <button class="domain-pager-btn" data-action="prev-domain-page" aria-label="Previous domain page">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.25" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
+      </button>
+      <div class="domain-pager-status">
+        <div class="domain-pager-dots">${dots}</div>
+        <span class="domain-pager-count">${domainPageIndex + 1}/${pageCount}</span>
+      </div>
+      <button class="domain-pager-btn" data-action="next-domain-page" aria-label="Next domain page">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.25" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" /></svg>
+      </button>
+    </div>`;
+}
+
+function renderOpenTabsUtility(pageCount) {
+  const pager = renderDomainPager(pageCount);
+  return pager ? `<div class="open-tabs-utility">${pager}</div>` : '';
+}
+
+async function moveDomainPage(delta) {
+  const pageCount = Math.ceil(domainGroups.length / DOMAINS_PER_PAGE);
+  if (pageCount <= 1) return;
+
+  domainPageIndex = normalizePageIndex(domainPageIndex + delta, pageCount);
+  await renderStaticDashboard();
 }
 
 
@@ -1100,11 +1153,22 @@ async function renderStaticDashboard() {
   const openTabsSectionTitle = document.getElementById('openTabsSectionTitle');
 
   if (domainGroups.length > 0 && openTabsSection) {
+    const pageCount = Math.ceil(domainGroups.length / DOMAINS_PER_PAGE);
+    domainPageIndex = normalizePageIndex(domainPageIndex, pageCount);
+    const pageStart = domainPageIndex * DOMAINS_PER_PAGE;
+    const visibleGroups = domainGroups.slice(pageStart, pageStart + DOMAINS_PER_PAGE);
+
     if (openTabsSectionTitle) openTabsSectionTitle.textContent = 'Open tabs';
     openTabsSectionCount.innerHTML = `${domainGroups.length} domain${domainGroups.length !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; <button class="action-btn close-tabs close-all-open-tabs" data-action="close-all-open-tabs">${ICONS.close} Close all ${realTabs.length} tabs</button>`;
-    openTabsMissionsEl.innerHTML = domainGroups.map(g => renderDomainCard(g)).join('');
+    openTabsMissionsEl.innerHTML = `
+      <div class="domain-page">
+        ${visibleGroups.map(g => renderDomainCard(g)).join('')}
+      </div>
+      ${renderOpenTabsUtility(pageCount)}
+    `;
     openTabsSection.style.display = 'block';
   } else if (openTabsSection) {
+    domainPageIndex = 0;
     if (openTabsMissionsEl) openTabsMissionsEl.innerHTML = '';
     checkAndShowEmptyState();
   }
@@ -1159,6 +1223,16 @@ document.addEventListener('click', async (e) => {
       overflowContainer.style.display = 'contents';
       actionEl.remove();
     }
+    return;
+  }
+
+  if (action === 'prev-domain-page') {
+    await moveDomainPage(-1);
+    return;
+  }
+
+  if (action === 'next-domain-page') {
+    await moveDomainPage(1);
     return;
   }
 
@@ -1283,6 +1357,11 @@ document.addEventListener('click', async (e) => {
     const groupLabel = group.domain === '__landing-pages__' ? 'Homepages' : (group.label || friendlyDomain(group.domain));
     showToast(`Closed ${urls.length} tab${urls.length !== 1 ? 's' : ''} from ${groupLabel}`);
 
+    if (card) {
+      setTimeout(() => renderStaticDashboard(), 260);
+    } else {
+      await renderStaticDashboard();
+    }
     return;
   }
 
@@ -1343,6 +1422,24 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+document.addEventListener('wheel', (e) => {
+  const missionsEl = e.target.closest('#openTabsMissions');
+  if (!missionsEl || e.target.closest('input, textarea, select')) return;
+
+  const pageCount = Math.ceil(domainGroups.length / DOMAINS_PER_PAGE);
+  if (pageCount <= 1) return;
+
+  if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
+
+  const now = Date.now();
+  if (now - lastDomainWheelAt < DOMAIN_WHEEL_COOLDOWN_MS) return;
+  if (Math.abs(e.deltaX) < DOMAIN_WHEEL_THRESHOLD) return;
+
+  lastDomainWheelAt = now;
+  e.preventDefault();
+  moveDomainPage(e.deltaX > 0 ? 1 : -1);
+}, { passive: false });
+
 document.addEventListener('error', (e) => {
   const img = e.target;
   if (img instanceof HTMLImageElement && (img.classList.contains('chip-favicon') || img.classList.contains('deferred-favicon'))) {
@@ -1351,7 +1448,7 @@ document.addEventListener('error', (e) => {
 }, true);
 
 document.addEventListener('submit', async (e) => {
-  const form = e.target.closest('[data-action="empty-search"]');
+  const form = e.target.closest('[data-action="tabout-search"]');
   if (!form) return;
 
   e.preventDefault();
